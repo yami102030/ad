@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TBC 自動排班管理系統</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/@babel/standalone@7.22.20/babel.min.js"></script>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "react": "https://esm.sh/react@18.2.0",
+            "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+            "lucide-react": "https://esm.sh/lucide-react@0.344.0?external=react,react-dom",
+            "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2"
+        }
+    }
+    </script>
+    <style>
+        body { background-color: #f8fafc; font-family: sans-serif; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module" data-presets="react">
+        import React, { useState, useEffect } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { Settings, CalendarDays, Play, Save, CheckCircle2, AlertCircle, Users, ChevronRight, X } from 'lucide-react';
+        import { createClient } from '@supabase/supabase-js';
+
+        // --- Supabase 連線設定 ---
+        const SUPABASE_URL = "https://jcepavwocdujoeoqxvsd.supabase.co";
+        const SUPABASE_KEY = "sb_publishable_Tj2n8e3yY1HyvaFzXRyO_w_PWrVFB7E"; // 建議這裡使用 anon key，若要有寫入權限，請確認 Supabase RLS 有開放 Insert 給匿名或登入者
+        const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        // --- 排班規則設定 (可依據教會實際需求調整) ---
+        const ROLES_CONFIG = [
+            { name: '司會', count: 1 },
+            { name: '執事輪值', count: 1 },
+            { name: 'PPT', count: 1 },
+            { name: '接待', count: 4 },
+            { name: '收奉獻', count: 4 },
+            { name: '新朋友關懷', count: 3 }
+        ];
+        const COMMUNION_ROLE = { name: '主餐', count: 6 }; // 特殊：僅每月第一週
+
+        function App() {
+            const [step, setStep] = useState(1); // 1: 設定, 2: 預覽, 3: 完成
+            const [year, setYear] = useState(new Date().getFullYear());
+            const [quarter, setQuarter] = useState(Math.ceil((new Date().getMonth() + 1) / 3));
+            const [sessionsToSchedule, setSessionsToSchedule] = useState(['第一堂', '第二堂']);
+            
+            const [dbData, setDbData] = useState({ members: [], positions: [], memberPositions: [], existingSchedules: [] });
+            const [isLoading, setIsLoading] = useState(true);
+            const [generatedDraft, setGeneratedDraft] = useState([]);
+            const [isSaving, setIsSaving] = useState(false);
+            const [errorMsg, setErrorMsg] = useState('');
+
+            // 1. 初始化拉取資料庫所有基礎資料
+            useEffect(() => {
+                const fetchData = async () => {
+                    setIsLoading(true);
+                    try {
+                        const [
+                            { data: members },
+                            { data: positions },
+                            { data: memberPositions },
+                            { data: schedules }
+                        ] = await Promise.all([
+                            supabase.from('members').select('*'),
+                            supabase.from('positions').select('*'),
+                            supabase.from('member_positions').select('*'),
+                            supabase.from('schedules').select('*')
+                        ]);
+
+                        setDbData({
+                            members: members || [],
+                            positions: positions || [],
+                            memberPositions: memberPositions || [],
+                            existingSchedules: schedules || []
+                        });
+                    } catch (err) {
+                        setErrorMsg('讀取資料庫失敗，請確認連線或 RLS 設定。');
+                    } finally {
+                        setIsLoading(false);
+                    }
+                };
+                fetchData();
+            }, []);
+
+            // 取得指定季度的所有星期日
+            const getSundaysInQuarter = (y, q) => {
+                const sundays = [];
+                const startMonth = (q - 1) * 3;
+                let d = new Date(y, startMonth, 1);
+                
+                // 推進到第一個星期日
+                while (d.getDay() !== 0) {
+                    d.setDate(d.getDate() + 1);
+                }
+                
+                // 抓取該季所有星期日
+                while (d.getMonth() >= startMonth && d.getMonth() < startMonth + 3) {
+                    sundays.push(new Date(d));
+                    d.setDate(d.getDate() + 7);
+                }
+                return sundays;
+            };
+
+            // 格式化日期為 YYYY-MM-DD (給資料庫用)
+            const formatDate = (date) => {
+                const offset = date.getTimezoneOffset() * 60000;
+                return (new Date(date - offset)).toISOString().split('T')[0];
+            };
+
+            // 2. 核心排班演算法
+            const runAutoSchedule = () => {
+                const sundays = getSundaysInQuarter(year, quarter);
+                const draft = [];
+                
+                // 建立同工服事次數追蹤表 (用於勞務均衡)
+                const usageCount = {};
+                dbData.members.forEach(m => usageCount[m.id] = 0);
+                
+                // 先把「過去已經服事過的次數」加進去，確保長期公平
+                dbData.existingSchedules.forEach(s => {
+                    if (usageCount[s.member_id] !== undefined) {
+                        usageCount[s.member_id]++;
+                    }
+                });
+
+                sundays.forEach(sunday => {
+                    const dateStr = formatDate(sunday);
+                    const isFirstSundayOfMonth = sunday.getDate() <= 7; // 判斷是否為第一週
+                    
+                    sessionsToSchedule.forEach(sessionName => {
+                        // 紀錄該天該堂已經被排的人，避免分身術
+                        const busyMembersInSession = new Set(); 
+
+                        // 決定這堂要排哪些崗位
+                        let rolesForThisSession = [...ROLES_CONFIG];
+                        if (isFirstSundayOfMonth && sessionName === '第一堂') { // 假設主餐只在第一堂
+                            rolesForThisSession.push(COMMUNION_ROLE);
+                        }
+
+                        rolesForThisSession.forEach(roleReq => {
+                            const posId = dbData.positions.find(p => p.name.trim() === roleReq.name)?.id;
+                            if (!posId) return; // 若資料庫沒這崗位就跳過
+
+                            // 找出有這個崗位資格的同工
+                            const eligibleMemberIds = dbData.memberPositions
+                                .filter(mp => mp.position_id === posId)
+                                .map(mp => mp.member_id);
+
+                            let candidates = dbData.members.filter(m => 
+                                eligibleMemberIds.includes(m.id) &&
+                                !busyMembersInSession.has(m.id) && // 這堂還沒被排
+                                !(m.unavailable_dates && m.unavailable_dates.includes(dateStr)) && // 沒有請假
+                                (m.availability_status !== '暫停服事' && m.availability_status !== '休息') // 意願許可
+                            );
+
+                            // 篩選堂別意願 (如果有特別設定雙堂意願的話)
+                            // 這裡簡化處理：如果同工有指定 preferred_session，盡量配合
+                            candidates = candidates.filter(m => {
+                                if (!m.preferred_session || m.preferred_session === '皆可') return true;
+                                if (sessionName === '第一堂' && m.preferred_session.includes('1')) return true;
+                                if (sessionName === '第二堂' && m.preferred_session.includes('2')) return true;
+                                return true; // 預設放寬
+                            });
+
+                            // 【核心邏輯】：依照服事次數由低到高排序，確保公平
+                            candidates.sort((a, b) => usageCount[a.id] - usageCount[b.id]);
+
+                            // 挑選所需人數
+                            const selected = candidates.slice(0, roleReq.count);
+
+                            selected.forEach(m => {
+                                draft.push({
+                                    id: `draft-${Math.random()}`, // 臨時 ID 給前端 React key 用
+                                    service_date: dateStr,
+                                    session: sessionName,
+                                    member_id: m.id,
+                                    position_id: posId,
+                                    // 以下給預覽顯示用
+                                    _memberName: m.name,
+                                    _positionName: roleReq.name
+                                });
+                                busyMembersInSession.add(m.id);
+                                usageCount[m.id]++; // 增加他的疲勞度
+                            });
+                        });
+                    });
+                });
+
+                setGeneratedDraft(draft);
+                setStep(2);
+            };
+
+            // 3. 儲存草稿至資料庫
+            const saveToDatabase = async () => {
+                setIsSaving(true);
+                try {
+                    // 將草稿轉換為資料庫格式 (拔除底線開頭的預覽用屬性)
+                    const insertPayload = generatedDraft.map(d => ({
+                        service_date: d.service_date,
+                        session: d.session,
+                        member_id: d.member_id,
+                        position_id: d.position_id
+                    }));
+
+                    // ⚠️ 注意：這會直接寫入 Supabase，確保你的 RLS 允許 Insert
+                    const { error } = await supabase.from('schedules').insert(insertPayload);
+                    
+                    if (error) throw error;
+                    setStep(3);
+                } catch (err) {
+                    console.error(err);
+                    setErrorMsg('儲存失敗！請確認 Supabase RLS 是否有開啟 Insert 權限。');
+                } finally {
+                    setIsSaving(false);
+                }
+            };
+
+            // UI 渲染：第一步 (設定)
+            const renderStep1 = () => (
+                <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-200 animate-in">
+                    <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2 mb-6">
+                        <Settings className="text-indigo-500"/> 排班參數設定
+                    </h2>
+                    
+                    <div className="grid grid-cols-2 gap-6 mb-8">
+                        <div>
+                            <label className="block text-sm font-bold text-slate-500 mb-2">排班年份</label>
+                            <input type="number" value={year} onChange={e => setYear(parseInt(e.target.value))} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 font-bold focus:border-indigo-500 outline-none" />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-bold text-slate-500 mb-2">排班季度</label>
+                            <select value={quarter} onChange={e => setQuarter(parseInt(e.target.value))} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 font-bold focus:border-indigo-500 outline-none">
+                                <option value={1}>Q1 (1-3月)</option>
+                                <option value={2}>Q2 (4-6月)</option>
+                                <option value={3}>Q3 (7-9月)</option>
+                                <option value={4}>Q4 (10-12月)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div className="mb-8">
+                        <label className="block text-sm font-bold text-slate-500 mb-2">要產生的堂別</label>
+                        <div className="flex gap-4">
+                            {['第一堂', '第二堂', '第三堂'].map(s => (
+                                <label key={s} className="flex items-center gap-2 cursor-pointer bg-slate-50 px-4 py-2 rounded-lg border border-slate-200 hover:bg-slate-100">
+                                    <input 
+                                        type="checkbox" 
+                                        checked={sessionsToSchedule.includes(s)}
+                                        onChange={(e) => {
+                                            if (e.target.checked) setSessionsToSchedule([...sessionsToSchedule, s]);
+                                            else setSessionsToSchedule(sessionsToSchedule.filter(x => x !== s));
+                                        }}
+                                        className="w-4 h-4 text-indigo-600 rounded"
+                                    />
+                                    <span className="font-bold text-slate-700">{s}</span>
+                                </label>
+                            ))}
+                        </div>
+                    </div>
+
+                    <button 
+                        onClick={runAutoSchedule} 
+                        disabled={isLoading || sessionsToSchedule.length === 0}
+                        className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white font-bold py-4 rounded-2xl flex items-center justify-center gap-2 transition-all active:scale-95"
+                    >
+                        {isLoading ? <span className="animate-pulse">讀取同工資料中...</span> : <><Play size={20}/> 執行 AI 自動排班</>}
+                    </button>
+                </div>
+            );
+
+            // UI 渲染：第二步 (預覽)
+            const renderStep2 = () => {
+                // 將一維陣列草稿轉為按日期群組，方便閱讀
+                const grouped = {};
+                generatedDraft.forEach(d => {
+                    if (!grouped[d.service_date]) grouped[d.service_date] = [];
+                    grouped[d.service_date].push(d);
+                });
+
+                return (
+                    <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-200 animate-in">
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                                <CalendarDays className="text-emerald-500"/> 排班預覽結果
+                            </h2>
+                            <span className="bg-emerald-50 text-emerald-600 px-3 py-1 rounded-full text-sm font-bold">
+                                共 {generatedDraft.length} 筆服事
+                            </span>
+                        </div>
+
+                        <div className="max-h-[500px] overflow-y-auto pr-2 mb-6 space-y-6">
+                            {Object.entries(grouped).map(([date, shifts]) => (
+                                <div key={date} className="border border-slate-100 rounded-2xl p-4 bg-slate-50">
+                                    <h3 className="font-black text-slate-800 mb-3 border-b border-slate-200 pb-2">{date}</h3>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        {shifts.map(shift => (
+                                            <div key={shift.id} className="bg-white px-3 py-2 rounded-xl border border-slate-200 flex justify-between items-center shadow-sm">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-500 font-bold">{shift.session}</span>
+                                                    <span className="text-sm font-bold text-indigo-600">{shift._positionName}</span>
+                                                </div>
+                                                <span className="font-bold text-slate-800">{shift._memberName}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="flex gap-4">
+                            <button onClick={() => setStep(1)} className="w-1/3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold py-4 rounded-2xl transition-all">
+                                重新產生
+                            </button>
+                            <button onClick={saveToDatabase} disabled={isSaving} className="w-2/3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-400 text-white font-bold py-4 rounded-2xl flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg shadow-emerald-200">
+                                {isSaving ? '正在寫入資料庫...' : <><Save size={20}/> 確定滿意，寫入正式資料庫</>}
+                            </button>
+                        </div>
+                    </div>
+                );
+            };
+
+            // UI 渲染：第三步 (完成)
+            const renderStep3 = () => (
+                <div className="bg-white p-12 rounded-3xl shadow-sm border border-slate-200 text-center animate-in">
+                    <div className="w-24 h-24 bg-emerald-100 text-emerald-500 rounded-full flex items-center justify-center mx-auto mb-6">
+                        <CheckCircle2 size={48} />
+                    </div>
+                    <h2 className="text-3xl font-black text-slate-800 mb-2">排班已成功發布！</h2>
+                    <p className="text-slate-500 mb-8">
+                        資料已經寫入 Supabase。同工現在可以在查詢系統看到 {year} 年 Q{quarter} 的排班了。
+                    </p>
+                    <button onClick={() => window.location.reload()} className="bg-slate-800 hover:bg-slate-900 text-white font-bold py-3 px-8 rounded-xl transition-all">
+                        回首頁
+                    </button>
+                </div>
+            );
+
+            return (
+                <div className="min-h-screen bg-slate-50 py-12 px-4 sm:px-6">
+                    <div className="max-w-3xl mx-auto">
+                        <div className="text-center mb-10">
+                            <h1 className="text-3xl font-black text-slate-800 flex items-center justify-center gap-3">
+                                <Users className="text-indigo-600"/> 自動排班與管理員系統
+                            </h1>
+                            <p className="text-slate-500 mt-2">智慧分配服事，一鍵產出整季草稿</p>
+                        </div>
+
+                        {/* 步驟指示器 */}
+                        <div className="flex items-center justify-center gap-4 mb-8">
+                            {[1, 2, 3].map(num => (
+                                <div key={num} className="flex items-center gap-4">
+                                    <div className={`w-10 h-10 rounded-full flex items-center justify-center font-black ${step >= num ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-400'}`}>
+                                        {num}
+                                    </div>
+                                    {num < 3 && <ChevronRight className="text-slate-300" />}
+                                </div>
+                            ))}
+                        </div>
+
+                        {errorMsg && (
+                            <div className="bg-red-50 text-red-600 p-4 rounded-xl border border-red-100 flex items-center gap-3 mb-6 font-bold">
+                                <AlertCircle /> {errorMsg}
+                            </div>
+                        )}
+
+                        {step === 1 && renderStep1()}
+                        {step === 2 && renderStep2()}
+                        {step === 3 && renderStep3()}
+                    </div>
+                </div>
+            );
+        }
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
