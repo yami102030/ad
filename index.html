@@ -20,35 +20,38 @@
     </script>
     <style>
         body { background-color: #f8fafc; font-family: sans-serif; }
+        .schedule-table th { @apply px-3 py-3 bg-slate-100 text-slate-600 text-[10px] md:text-xs font-bold uppercase tracking-wider text-left border-b; }
+        .schedule-table td { @apply px-3 py-2 text-xs md:text-sm text-slate-700 border-b border-slate-50; }
+        .edit-select { @apply bg-white border border-slate-200 rounded px-1 py-0.5 text-xs focus:ring-1 focus:ring-indigo-500 outline-none w-full; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .animate-fadeIn { animation: fadeIn 0.2s ease-out; }
     </style>
 </head>
 <body>
     <div id="root"></div>
 
     <script type="text/babel" data-type="module" data-presets="react">
-        import React, { useState, useEffect } from 'react';
+        import React, { useState, useEffect, useMemo } from 'react';
         import { createRoot } from 'react-dom/client';
-        import { Settings, CalendarDays, Play, Save, CheckCircle2, AlertCircle, Users, ChevronRight, X } from 'lucide-react';
+        import { Settings, Play, Save, CheckCircle2, AlertCircle, Users, ChevronRight, LayoutList, RefreshCw, Trash2, Info, AlertTriangle, X } from 'lucide-react';
         import { createClient } from '@supabase/supabase-js';
 
-        // --- Supabase 連線設定 ---
         const SUPABASE_URL = "https://jcepavwocdujoeoqxvsd.supabase.co";
-        const SUPABASE_KEY = "sb_publishable_Tj2n8e3yY1HyvaFzXRyO_w_PWrVFB7E"; // 建議這裡使用 anon key，若要有寫入權限，請確認 Supabase RLS 有開放 Insert 給匿名或登入者
+        const SUPABASE_KEY = "sb_publishable_Tj2n8e3yY1HyvaFzXRyO_w_PWrVFB7E"; 
         const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-        // --- 排班規則設定 (可依據教會實際需求調整) ---
         const ROLES_CONFIG = [
             { name: '司會', count: 1 },
             { name: '執事輪值', count: 1 },
-            { name: 'PPT', count: 1 },
             { name: '接待', count: 4 },
             { name: '收奉獻', count: 4 },
+            { name: 'PPT', count: 1 },
             { name: '新朋友關懷', count: 3 }
         ];
-        const COMMUNION_ROLE = { name: '主餐', count: 6 }; // 特殊：僅每月第一週
+        const COMMUNION_ROLE = { name: '主餐', count: 6 };
 
         function App() {
-            const [step, setStep] = useState(1); // 1: 設定, 2: 預覽, 3: 完成
+            const [step, setStep] = useState(1); 
             const [year, setYear] = useState(new Date().getFullYear());
             const [quarter, setQuarter] = useState(Math.ceil((new Date().getMonth() + 1) / 3));
             const [sessionsToSchedule, setSessionsToSchedule] = useState(['第一堂', '第二堂']);
@@ -58,51 +61,46 @@
             const [generatedDraft, setGeneratedDraft] = useState([]);
             const [isSaving, setIsSaving] = useState(false);
             const [errorMsg, setErrorMsg] = useState('');
+            const [showClearModal, setShowClearModal] = useState(false);
+            const [isClearing, setIsClearing] = useState(false);
 
-            // 1. 初始化拉取資料庫所有基礎資料
             useEffect(() => {
-                const fetchData = async () => {
-                    setIsLoading(true);
-                    try {
-                        const [
-                            { data: members },
-                            { data: positions },
-                            { data: memberPositions },
-                            { data: schedules }
-                        ] = await Promise.all([
-                            supabase.from('members').select('*'),
-                            supabase.from('positions').select('*'),
-                            supabase.from('member_positions').select('*'),
-                            supabase.from('schedules').select('*')
-                        ]);
-
-                        setDbData({
-                            members: members || [],
-                            positions: positions || [],
-                            memberPositions: memberPositions || [],
-                            existingSchedules: schedules || []
-                        });
-                    } catch (err) {
-                        setErrorMsg('讀取資料庫失敗，請確認連線或 RLS 設定。');
-                    } finally {
-                        setIsLoading(false);
-                    }
-                };
-                fetchData();
+                fetchInitialData();
             }, []);
 
-            // 取得指定季度的所有星期日
+            const fetchInitialData = async () => {
+                setIsLoading(true);
+                try {
+                    const [
+                        { data: members },
+                        { data: positions },
+                        { data: memberPositions },
+                        { data: schedules }
+                    ] = await Promise.all([
+                        supabase.from('members').select('*'),
+                        supabase.from('positions').select('*'),
+                        supabase.from('member_positions').select('*'),
+                        supabase.from('schedules').select('*')
+                    ]);
+
+                    setDbData({
+                        members: members || [],
+                        positions: positions || [],
+                        memberPositions: memberPositions || [],
+                        existingSchedules: schedules || []
+                    });
+                } catch (err) {
+                    setErrorMsg('讀取資料庫失敗。');
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
             const getSundaysInQuarter = (y, q) => {
                 const sundays = [];
                 const startMonth = (q - 1) * 3;
                 let d = new Date(y, startMonth, 1);
-                
-                // 推進到第一個星期日
-                while (d.getDay() !== 0) {
-                    d.setDate(d.getDate() + 1);
-                }
-                
-                // 抓取該季所有星期日
+                while (d.getDay() !== 0) { d.setDate(d.getDate() + 1); }
                 while (d.getMonth() >= startMonth && d.getMonth() < startMonth + 3) {
                     sundays.push(new Date(d));
                     d.setDate(d.getDate() + 7);
@@ -110,87 +108,74 @@
                 return sundays;
             };
 
-            // 格式化日期為 YYYY-MM-DD (給資料庫用)
             const formatDate = (date) => {
                 const offset = date.getTimezoneOffset() * 60000;
                 return (new Date(date - offset)).toISOString().split('T')[0];
             };
 
-            // 2. 核心排班演算法
             const runAutoSchedule = () => {
                 const sundays = getSundaysInQuarter(year, quarter);
                 const draft = [];
-                
-                // 建立同工服事次數追蹤表 (用於勞務均衡)
                 const usageCount = {};
                 dbData.members.forEach(m => usageCount[m.id] = 0);
-                
-                // 先把「過去已經服事過的次數」加進去，確保長期公平
-                dbData.existingSchedules.forEach(s => {
-                    if (usageCount[s.member_id] !== undefined) {
-                        usageCount[s.member_id]++;
-                    }
+                dbData.existingSchedules.forEach(s => { 
+                    if (usageCount[s.member_id] !== undefined) usageCount[s.member_id]++; 
                 });
 
                 sundays.forEach(sunday => {
                     const dateStr = formatDate(sunday);
-                    const isFirstSundayOfMonth = sunday.getDate() <= 7; // 判斷是否為第一週
+                    const isFirstSundayOfMonth = sunday.getDate() <= 7;
                     
                     sessionsToSchedule.forEach(sessionName => {
-                        // 紀錄該天該堂已經被排的人，避免分身術
                         const busyMembersInSession = new Set(); 
-
-                        // 決定這堂要排哪些崗位
                         let rolesForThisSession = [...ROLES_CONFIG];
-                        if (isFirstSundayOfMonth && sessionName === '第一堂') { // 假設主餐只在第一堂
-                            rolesForThisSession.push(COMMUNION_ROLE);
+                        if (isFirstSundayOfMonth && sessionName === '第一堂') {
+                            rolesForThisSession = [
+                                ROLES_CONFIG[0], ROLES_CONFIG[1], ROLES_CONFIG[2], 
+                                ROLES_CONFIG[3], COMMUNION_ROLE, ROLES_CONFIG[4], ROLES_CONFIG[5]
+                            ];
                         }
 
                         rolesForThisSession.forEach(roleReq => {
                             const posId = dbData.positions.find(p => p.name.trim() === roleReq.name)?.id;
-                            if (!posId) return; // 若資料庫沒這崗位就跳過
+                            if (!posId) return;
 
-                            // 找出有這個崗位資格的同工
                             const eligibleMemberIds = dbData.memberPositions
                                 .filter(mp => mp.position_id === posId)
                                 .map(mp => mp.member_id);
 
                             let candidates = dbData.members.filter(m => 
                                 eligibleMemberIds.includes(m.id) &&
-                                !busyMembersInSession.has(m.id) && // 這堂還沒被排
-                                !(m.unavailable_dates && m.unavailable_dates.includes(dateStr)) && // 沒有請假
-                                (m.availability_status !== '暫停服事' && m.availability_status !== '休息') // 意願許可
+                                !busyMembersInSession.has(m.id) &&
+                                !(m.unavailable_dates && m.unavailable_dates.includes(dateStr)) &&
+                                (m.availability_status !== '暫停服事' && m.availability_status !== '休息')
                             );
 
-                            // 篩選堂別意願 (如果有特別設定雙堂意願的話)
-                            // 這裡簡化處理：如果同工有指定 preferred_session，盡量配合
                             candidates = candidates.filter(m => {
                                 if (!m.preferred_session || m.preferred_session === '皆可') return true;
                                 if (sessionName === '第一堂' && m.preferred_session.includes('1')) return true;
                                 if (sessionName === '第二堂' && m.preferred_session.includes('2')) return true;
-                                return true; // 預設放寬
+                                return true;
                             });
 
-                            // 【核心邏輯】：依照服事次數由低到高排序，確保公平
                             candidates.sort((a, b) => usageCount[a.id] - usageCount[b.id]);
-
-                            // 挑選所需人數
-                            const selected = candidates.slice(0, roleReq.count);
-
-                            selected.forEach(m => {
-                                draft.push({
-                                    id: `draft-${Math.random()}`, // 臨時 ID 給前端 React key 用
-                                    service_date: dateStr,
-                                    session: sessionName,
-                                    member_id: m.id,
-                                    position_id: posId,
-                                    // 以下給預覽顯示用
-                                    _memberName: m.name,
-                                    _positionName: roleReq.name
-                                });
-                                busyMembersInSession.add(m.id);
-                                usageCount[m.id]++; // 增加他的疲勞度
-                            });
+                            
+                            for (let i = 0; i < roleReq.count; i++) {
+                                if (candidates[i]) {
+                                    const m = candidates[i];
+                                    draft.push({
+                                        id: `${dateStr}_${sessionName}_${posId}_${i}`,
+                                        service_date: dateStr,
+                                        session: sessionName,
+                                        member_id: m.id,
+                                        position_id: posId,
+                                        _memberName: m.name,
+                                        _positionName: roleReq.name
+                                    });
+                                    busyMembersInSession.add(m.id);
+                                    usageCount[m.id]++;
+                                }
+                            }
                         });
                     });
                 });
@@ -199,11 +184,33 @@
                 setStep(2);
             };
 
-            // 3. 儲存草稿至資料庫
+            const updateDraftMember = (draftId, newMemberId) => {
+                const member = dbData.members.find(m => m.id === newMemberId);
+                setGeneratedDraft(prev => prev.map(item => 
+                    item.id === draftId 
+                    ? { ...item, member_id: newMemberId, _memberName: member ? member.name : '未指定' }
+                    : item
+                ));
+            };
+
             const saveToDatabase = async () => {
                 setIsSaving(true);
+                setErrorMsg('');
                 try {
-                    // 將草稿轉換為資料庫格式 (拔除底線開頭的預覽用屬性)
+                    const sundays = getSundaysInQuarter(year, quarter);
+                    if (sundays.length === 0) throw new Error("無效的日期區間");
+                    const startDate = formatDate(sundays[0]);
+                    const endDate = formatDate(sundays[sundays.length - 1]);
+
+                    const { error: delError } = await supabase
+                        .from('schedules')
+                        .delete()
+                        .gte('service_date', startDate)
+                        .lte('service_date', endDate)
+                        .in('session', sessionsToSchedule); 
+                    
+                    if (delError) throw delError;
+
                     const insertPayload = generatedDraft.map(d => ({
                         service_date: d.service_date,
                         session: d.session,
@@ -211,132 +218,228 @@
                         position_id: d.position_id
                     }));
 
-                    // ⚠️ 注意：這會直接寫入 Supabase，確保你的 RLS 允許 Insert
-                    const { error } = await supabase.from('schedules').insert(insertPayload);
-                    
-                    if (error) throw error;
+                    const { error: insError } = await supabase.from('schedules').insert(insertPayload);
+                    if (insError) throw insError;
+
                     setStep(3);
                 } catch (err) {
-                    console.error(err);
-                    setErrorMsg('儲存失敗！請確認 Supabase RLS 是否有開啟 Insert 權限。');
+                    setErrorMsg(err.message || '儲存過程中發生錯誤。');
                 } finally {
                     setIsSaving(false);
                 }
             };
 
-            // UI 渲染：第一步 (設定)
-            const renderStep1 = () => (
-                <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-200 animate-in">
-                    <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2 mb-6">
-                        <Settings className="text-indigo-500"/> 排班參數設定
-                    </h2>
+            // 全局清空功能
+            const handleClearAll = async () => {
+                setIsClearing(true);
+                try {
+                    // Supabase 的安全機制通常不允許不帶條件的 delete()
+                    // 這裡使用一項大於 1900 年的條件來選取所有資料
+                    const { error } = await supabase
+                        .from('schedules')
+                        .delete()
+                        .gt('service_date', '1900-01-01');
                     
-                    <div className="grid grid-cols-2 gap-6 mb-8">
-                        <div>
-                            <label className="block text-sm font-bold text-slate-500 mb-2">排班年份</label>
-                            <input type="number" value={year} onChange={e => setYear(parseInt(e.target.value))} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 font-bold focus:border-indigo-500 outline-none" />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-bold text-slate-500 mb-2">排班季度</label>
-                            <select value={quarter} onChange={e => setQuarter(parseInt(e.target.value))} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 font-bold focus:border-indigo-500 outline-none">
-                                <option value={1}>Q1 (1-3月)</option>
-                                <option value={2}>Q2 (4-6月)</option>
-                                <option value={3}>Q3 (7-9月)</option>
-                                <option value={4}>Q4 (10-12月)</option>
-                            </select>
-                        </div>
-                    </div>
+                    if (error) throw error;
+                    
+                    setShowClearModal(false);
+                    fetchInitialData(); // 重新整理資料以清空疲勞度計算
+                    setErrorMsg('資料表已全數清空。');
+                    setTimeout(() => setErrorMsg(''), 3000);
+                } catch (err) {
+                    setErrorMsg('清空失敗，請確認是否已設定 DELETE 權限。');
+                } finally {
+                    setIsClearing(false);
+                }
+            };
 
-                    <div className="mb-8">
-                        <label className="block text-sm font-bold text-slate-500 mb-2">要產生的堂別</label>
-                        <div className="flex gap-4">
-                            {['第一堂', '第二堂', '第三堂'].map(s => (
-                                <label key={s} className="flex items-center gap-2 cursor-pointer bg-slate-50 px-4 py-2 rounded-lg border border-slate-200 hover:bg-slate-100">
-                                    <input 
-                                        type="checkbox" 
-                                        checked={sessionsToSchedule.includes(s)}
-                                        onChange={(e) => {
-                                            if (e.target.checked) setSessionsToSchedule([...sessionsToSchedule, s]);
-                                            else setSessionsToSchedule(sessionsToSchedule.filter(x => x !== s));
-                                        }}
-                                        className="w-4 h-4 text-indigo-600 rounded"
-                                    />
-                                    <span className="font-bold text-slate-700">{s}</span>
-                                </label>
-                            ))}
-                        </div>
-                    </div>
+            const MemberSelector = ({ item }) => {
+                const candidates = useMemo(() => {
+                    const eligibleIds = dbData.memberPositions
+                        .filter(mp => mp.position_id === item.position_id)
+                        .map(mp => mp.member_id);
+                    return dbData.members.filter(m => eligibleIds.includes(m.id));
+                }, [item.position_id]);
 
-                    <button 
-                        onClick={runAutoSchedule} 
-                        disabled={isLoading || sessionsToSchedule.length === 0}
-                        className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white font-bold py-4 rounded-2xl flex items-center justify-center gap-2 transition-all active:scale-95"
+                const isConflict = generatedDraft.some(d => 
+                    d.id !== item.id && 
+                    d.service_date === item.service_date && 
+                    d.session === item.session && 
+                    d.member_id === item.member_id
+                );
+
+                return (
+                    <select 
+                        value={item.member_id} 
+                        onChange={(e) => updateDraftMember(item.id, e.target.value)}
+                        className={`edit-select ${isConflict ? 'text-red-600 font-bold border-red-300 bg-red-50' : ''}`}
                     >
-                        {isLoading ? <span className="animate-pulse">讀取同工資料中...</span> : <><Play size={20}/> 執行 AI 自動排班</>}
-                    </button>
+                        {candidates.map(c => (
+                            <option key={c.id} value={c.id}>{c.name}</option>
+                        ))}
+                    </select>
+                );
+            };
+
+            const renderStep1 = () => (
+                <div className="space-y-6">
+                    <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-200">
+                        <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2 mb-6">
+                            <Settings className="text-indigo-500"/> 排班參數設定
+                        </h2>
+                        
+                        <div className="grid grid-cols-2 gap-6 mb-8">
+                            <div>
+                                <label className="block text-sm font-bold text-slate-500 mb-2">排班年份</label>
+                                <input type="number" value={year} onChange={e => setYear(parseInt(e.target.value))} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 font-bold focus:border-indigo-500 outline-none" />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-bold text-slate-500 mb-2">排班季度</label>
+                                <select value={quarter} onChange={e => setQuarter(parseInt(e.target.value))} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 font-bold focus:border-indigo-500 outline-none">
+                                    <option value={1}>Q1 (1-3月)</option>
+                                    <option value={2}>Q2 (4-6月)</option>
+                                    <option value={3}>Q3 (7-9月)</option>
+                                    <option value={4}>Q4 (10-12月)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div className="mb-8">
+                            <label className="block text-sm font-bold text-slate-500 mb-2">要產生的堂別</label>
+                            <div className="flex gap-4">
+                                {['第一堂', '第二堂'].map(s => (
+                                    <label key={s} className="flex items-center gap-2 cursor-pointer bg-slate-50 px-4 py-2 rounded-lg border border-slate-200 hover:bg-slate-100">
+                                        <input 
+                                            type="checkbox" 
+                                            checked={sessionsToSchedule.includes(s)}
+                                            onChange={(e) => {
+                                                if (e.target.checked) setSessionsToSchedule([...sessionsToSchedule, s]);
+                                                else setSessionsToSchedule(sessionsToSchedule.filter(x => x !== s));
+                                            }}
+                                            className="w-4 h-4 text-indigo-600 rounded"
+                                        />
+                                        <span className="font-bold text-slate-700">{s}</span>
+                                    </label>
+                                ))}
+                            </div>
+                        </div>
+
+                        <button 
+                            onClick={runAutoSchedule} 
+                            disabled={isLoading || sessionsToSchedule.length === 0}
+                            className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white font-bold py-4 rounded-2xl flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg"
+                        >
+                            {isLoading ? <span className="animate-pulse">讀取數據中...</span> : <><Play size={20}/> 進入預覽並調整</>}
+                        </button>
+                    </div>
+
+                    {/* 危險區域 */}
+                    <div className="bg-red-50 p-6 rounded-3xl border border-red-100">
+                        <h3 className="text-red-800 font-bold flex items-center gap-2 mb-2">
+                            <AlertTriangle size={18}/> 危險區域
+                        </h3>
+                        <p className="text-red-600 text-xs mb-4">清空資料表將會刪除所有歷史排班記錄，這將無法還原，請謹慎操作。</p>
+                        <button 
+                            onClick={() => setShowClearModal(true)}
+                            className="text-red-600 border border-red-200 bg-white hover:bg-red-600 hover:text-white transition-all px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2"
+                        >
+                            <Trash2 size={16}/> 清空 schedules 資料表
+                        </button>
+                    </div>
                 </div>
             );
 
-            // UI 渲染：第二步 (預覽)
             const renderStep2 = () => {
-                // 將一維陣列草稿轉為按日期群組，方便閱讀
-                const grouped = {};
+                const tableData = {};
                 generatedDraft.forEach(d => {
-                    if (!grouped[d.service_date]) grouped[d.service_date] = [];
-                    grouped[d.service_date].push(d);
+                    const key = `${d.service_date}_${d.session}`;
+                    if (!tableData[key]) tableData[key] = { date: d.service_date, session: d.session, items: {} };
+                    if (!tableData[key].items[d._positionName]) tableData[key].items[d._positionName] = [];
+                    tableData[key].items[d._positionName].push(d);
+                });
+
+                const sortedRows = Object.values(tableData).sort((a, b) => {
+                    if (a.session !== b.session) return a.session.localeCompare(b.session);
+                    return a.date.localeCompare(b.date);
                 });
 
                 return (
-                    <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-200 animate-in">
+                    <div className="bg-white p-4 md:p-6 rounded-3xl shadow-sm border border-slate-200">
                         <div className="flex justify-between items-center mb-6">
                             <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-                                <CalendarDays className="text-emerald-500"/> 排班預覽結果
+                                <LayoutList className="text-emerald-500"/> 排班預覽
                             </h2>
-                            <span className="bg-emerald-50 text-emerald-600 px-3 py-1 rounded-full text-sm font-bold">
-                                共 {generatedDraft.length} 筆服事
-                            </span>
                         </div>
 
-                        <div className="max-h-[500px] overflow-y-auto pr-2 mb-6 space-y-6">
-                            {Object.entries(grouped).map(([date, shifts]) => (
-                                <div key={date} className="border border-slate-100 rounded-2xl p-4 bg-slate-50">
-                                    <h3 className="font-black text-slate-800 mb-3 border-b border-slate-200 pb-2">{date}</h3>
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                        {shifts.map(shift => (
-                                            <div key={shift.id} className="bg-white px-3 py-2 rounded-xl border border-slate-200 flex justify-between items-center shadow-sm">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-xs bg-slate-100 px-2 py-0.5 rounded text-slate-500 font-bold">{shift.session}</span>
-                                                    <span className="text-sm font-bold text-indigo-600">{shift._positionName}</span>
+                        <div className="overflow-x-auto border border-slate-100 rounded-xl mb-6 shadow-inner">
+                            <table className="w-full schedule-table border-collapse min-w-[1100px]">
+                                <thead>
+                                    <tr>
+                                        <th className="sticky left-0 bg-slate-100 z-10 w-20">堂別</th>
+                                        <th className="w-32">日期</th>
+                                        <th className="w-28">司會</th>
+                                        <th className="w-28">執事</th>
+                                        <th>接待 (4人)</th>
+                                        <th>收奉獻 (4人)</th>
+                                        <th className="w-36">主餐 (僅首週)</th>
+                                        <th className="w-28">PPT</th>
+                                        <th>新朋友關懷 (3人)</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {sortedRows.map((row, idx) => (
+                                        <tr key={idx} className="hover:bg-slate-50 transition-colors">
+                                            <td className="font-bold text-indigo-700 sticky left-0 bg-white group-hover:bg-slate-50 border-r">{row.session}</td>
+                                            <td className="whitespace-nowrap font-medium">{row.date}</td>
+                                            <td>{row.items['司會']?.map(d => <MemberSelector key={d.id} item={d} />)}</td>
+                                            <td>{row.items['執事輪值']?.map(d => <MemberSelector key={d.id} item={d} />)}</td>
+                                            <td>
+                                                <div className="grid grid-cols-2 gap-1">
+                                                    {row.items['接待']?.map(d => <MemberSelector key={d.id} item={d} />)}
                                                 </div>
-                                                <span className="font-bold text-slate-800">{shift._memberName}</span>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            ))}
+                                            </td>
+                                            <td>
+                                                <div className="grid grid-cols-2 gap-1">
+                                                    {row.items['收奉獻']?.map(d => <MemberSelector key={d.id} item={d} />)}
+                                                </div>
+                                            </td>
+                                            <td className="bg-emerald-50/20">
+                                                <div className="grid grid-cols-2 gap-0.5">
+                                                    {row.items['主餐']?.map(d => <MemberSelector key={d.id} item={d} />)}
+                                                </div>
+                                            </td>
+                                            <td>{row.items['PPT']?.map(d => <MemberSelector key={d.id} item={d} />)}</td>
+                                            <td>
+                                                <div className="grid grid-cols-1 gap-1">
+                                                    {row.items['新朋友關懷']?.map(d => <MemberSelector key={d.id} item={d} />)}
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
                         </div>
 
                         <div className="flex gap-4">
                             <button onClick={() => setStep(1)} className="w-1/3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold py-4 rounded-2xl transition-all">
-                                重新產生
+                                返回重新設定
                             </button>
-                            <button onClick={saveToDatabase} disabled={isSaving} className="w-2/3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-400 text-white font-bold py-4 rounded-2xl flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg shadow-emerald-200">
-                                {isSaving ? '正在寫入資料庫...' : <><Save size={20}/> 確定滿意，寫入正式資料庫</>}
+                            <button onClick={saveToDatabase} disabled={isSaving} className="w-2/3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-400 text-white font-bold py-4 rounded-2xl flex items-center justify-center gap-2 transition-all active:scale-95 shadow-lg shadow-emerald-100">
+                                {isSaving ? <span className="animate-spin text-white"><RefreshCw size={20}/></span> : <><Save size={20}/> 確定滿意，覆寫並發布</>}
                             </button>
                         </div>
                     </div>
                 );
             };
 
-            // UI 渲染：第三步 (完成)
             const renderStep3 = () => (
-                <div className="bg-white p-12 rounded-3xl shadow-sm border border-slate-200 text-center animate-in">
+                <div className="bg-white p-12 rounded-3xl shadow-sm border border-slate-200 text-center">
                     <div className="w-24 h-24 bg-emerald-100 text-emerald-500 rounded-full flex items-center justify-center mx-auto mb-6">
                         <CheckCircle2 size={48} />
                     </div>
-                    <h2 className="text-3xl font-black text-slate-800 mb-2">排班已成功發布！</h2>
+                    <h2 className="text-3xl font-black text-slate-800 mb-2">排班更新完成！</h2>
                     <p className="text-slate-500 mb-8">
-                        資料已經寫入 Supabase。同工現在可以在查詢系統看到 {year} 年 Q{quarter} 的排班了。
+                        資料庫已成功更新並自動清理多餘項目。
                     </p>
                     <button onClick={() => window.location.reload()} className="bg-slate-800 hover:bg-slate-900 text-white font-bold py-3 px-8 rounded-xl transition-all">
                         回首頁
@@ -345,36 +448,66 @@
             );
 
             return (
-                <div className="min-h-screen bg-slate-50 py-12 px-4 sm:px-6">
-                    <div className="max-w-3xl mx-auto">
+                <div className="min-h-screen bg-slate-50 py-12 px-4">
+                    <div className="max-w-[1250px] mx-auto">
                         <div className="text-center mb-10">
                             <h1 className="text-3xl font-black text-slate-800 flex items-center justify-center gap-3">
-                                <Users className="text-indigo-600"/> 自動排班與管理員系統
+                                <Users className="text-indigo-600"/> TBC 自動排班系統
                             </h1>
-                            <p className="text-slate-500 mt-2">智慧分配服事，一鍵產出整季草稿</p>
                         </div>
 
-                        {/* 步驟指示器 */}
                         <div className="flex items-center justify-center gap-4 mb-8">
                             {[1, 2, 3].map(num => (
                                 <div key={num} className="flex items-center gap-4">
-                                    <div className={`w-10 h-10 rounded-full flex items-center justify-center font-black ${step >= num ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-400'}`}>
+                                    <div className={`w-10 h-10 rounded-full flex items-center justify-center font-black transition-all ${step >= num ? 'bg-indigo-600 text-white' : 'bg-slate-200 text-slate-400'}`}>
                                         {num}
                                     </div>
-                                    {num < 3 && <ChevronRight className="text-slate-300" />}
+                                    {num < 3 && <ChevronRight className={`transition-colors ${step > num ? 'text-indigo-600' : 'text-slate-300'}`} />}
                                 </div>
                             ))}
                         </div>
 
                         {errorMsg && (
-                            <div className="bg-red-50 text-red-600 p-4 rounded-xl border border-red-100 flex items-center gap-3 mb-6 font-bold">
-                                <AlertCircle /> {errorMsg}
+                            <div className="max-w-3xl mx-auto bg-slate-800 text-white p-4 rounded-2xl flex items-center gap-3 mb-6 font-bold shadow-xl animate-bounce">
+                                <Info className="text-indigo-400" /> {errorMsg}
                             </div>
                         )}
 
-                        {step === 1 && renderStep1()}
-                        {step === 2 && renderStep2()}
-                        {step === 3 && renderStep3()}
+                        <div>
+                            {step === 1 && renderStep1()}
+                            {step === 2 && renderStep2()}
+                            {step === 3 && renderStep3()}
+                        </div>
+
+                        {/* 自定義確認 Modal */}
+                        {showClearModal && (
+                            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fadeIn">
+                                <div className="bg-white w-full max-w-md rounded-3xl p-8 shadow-2xl">
+                                    <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mb-6">
+                                        <AlertTriangle size={32}/>
+                                    </div>
+                                    <h3 className="text-2xl font-black text-slate-800 mb-2">確定要清空所有資料？</h3>
+                                    <p className="text-slate-500 mb-8 text-sm">
+                                        這項操作將刪除 <code className="bg-slate-100 px-1 rounded">schedules</code> 表格內的所有行。資料一旦刪除將無法復原。
+                                    </p>
+                                    <div className="flex gap-4">
+                                        <button 
+                                            onClick={() => setShowClearModal(false)}
+                                            className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold py-3 rounded-xl transition-all"
+                                        >
+                                            取消
+                                        </button>
+                                        <button 
+                                            onClick={handleClearAll}
+                                            disabled={isClearing}
+                                            className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-xl transition-all disabled:bg-slate-300"
+                                        >
+                                            {isClearing ? '清理中...' : '確認刪除'}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             );
